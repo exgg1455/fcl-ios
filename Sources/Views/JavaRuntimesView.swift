@@ -3,7 +3,7 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct JavaRuntimesView: View {
-    @StateObject private var installer = JavaRuntimeInstaller()
+    @EnvironmentObject private var installer: JavaRuntimeInstaller
     @State private var importMode: ImportMode?
     @State private var isShowingImporter = false
     @State private var isShowingDownload = false
@@ -25,18 +25,8 @@ struct JavaRuntimesView: View {
         List {
             if installer.isWorking {
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(installer.stage)
-                                .font(.headline)
-                            Spacer()
-                            Text("\(Int(installer.progress * 100))%")
-                                .font(.caption.monospacedDigit())
-                                .foregroundColor(.secondary)
-                        }
-                        ProgressView(value: installer.progress)
-                    }
-                    .padding(.vertical, 4)
+                    JavaProgressContent()
+                        .padding(.vertical, 4)
                 }
             }
 
@@ -61,8 +51,17 @@ struct JavaRuntimesView: View {
             }
 
             Section(
-                header: Text("Install"),
-                footer: Text("The runtime must be an OpenJDK build for iOS arm64 (the same kind Amethyst and PojavLauncher for iOS use). Android or Linux builds are detected and marked as unusable. Supported files: .tar, .tar.gz and .tar.xz. For a zip or ipa file, extract it in the Files app first and use Import Folder.")
+                header: Text("Download for iOS"),
+                footer: Text("iOS arm64 OpenJDK builds from the Amethyst project. The launcher picks the right one for each Minecraft version and downloads it automatically when it is missing.")
+            ) {
+                ForEach(JavaCatalog.options) { option in
+                    JavaCatalogRow(option: option)
+                }
+            }
+
+            Section(
+                header: Text("Install manually"),
+                footer: Text("The runtime must be an OpenJDK build for iOS arm64 (the same kind Amethyst and PojavLauncher for iOS use). Android or Linux builds are detected and marked as unusable. Supported files: .zip, .tar, .tar.gz and .tar.xz.")
             ) {
                 Button {
                     importMode = .archive
@@ -109,22 +108,6 @@ struct JavaRuntimesView: View {
             JavaDownloadView { address in
                 installer.download(from: address)
             }
-        }
-        .alert("Java runtime", isPresented: Binding(
-            get: { installer.resultMessage != nil },
-            set: { if !$0 { installer.resultMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(installer.resultMessage ?? "")
-        }
-        .alert("Installation failed", isPresented: Binding(
-            get: { installer.errorMessage != nil },
-            set: { if !$0 { installer.errorMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(installer.errorMessage ?? "")
         }
         .confirmationDialog(
             "Delete \(pendingRemoval?.name ?? "")?",
@@ -200,7 +183,7 @@ struct JavaDownloadView: View {
             Form {
                 Section(
                     header: Text("Archive link"),
-                    footer: Text("Direct link to a .tar, .tar.gz or .tar.xz file that contains a Java runtime built for iOS.")
+                    footer: Text("Direct link to a .zip, .tar, .tar.gz or .tar.xz file that contains a Java runtime built for iOS.")
                 ) {
                     TextField("https://", text: $addressText)
                         .keyboardType(.URL)
@@ -228,5 +211,81 @@ struct JavaDownloadView: View {
                 }
             }
         }
+    }
+}
+
+struct JavaProgressContent: View {
+    @EnvironmentObject private var installer: JavaRuntimeInstaller
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(installer.stage)
+                    .font(.headline)
+                Spacer()
+                Text("\(Int(installer.progress * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+                Button(role: .destructive) {
+                    installer.cancel()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+            }
+            ProgressView(value: installer.progress)
+            if !installer.queuedMajorVersions.isEmpty {
+                Text("Queued: " + installer.queuedMajorVersions.map { "Java \($0)" }.joined(separator: ", "))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+}
+
+struct JavaCatalogRow: View {
+    @EnvironmentObject private var installer: JavaRuntimeInstaller
+    let option: JavaDownloadOption
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(option.title)
+                    .font(.headline)
+                Text(option.usage)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(ByteCountFormatter.string(fromByteCount: option.downloadSize, countStyle: .file))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            if installer.installingMajorVersion == option.majorVersion {
+                ProgressView()
+            } else if installer.queuedMajorVersions.contains(option.majorVersion) {
+                Text("Queued")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else if installer.isInstalled(option) {
+                Menu {
+                    Button("Reinstall") {
+                        installer.install(option)
+                    }
+                } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.title3)
+                }
+            } else {
+                Button {
+                    installer.install(option)
+                } label: {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.title3)
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.vertical, 2)
     }
 }

@@ -3,6 +3,7 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var store: LauncherStore
     @EnvironmentObject private var installationManager: InstallationManager
+    @EnvironmentObject private var javaInstaller: JavaRuntimeInstaller
     @State private var isShowingLaunchSheet = false
     @State private var isShowingStikDebugFailure = false
 
@@ -16,6 +17,11 @@ struct HomeView: View {
                     jitCard
                     if installationManager.isInstalling {
                         InstallationProgressCard()
+                    }
+                    if javaInstaller.isWorking {
+                        JavaProgressContent()
+                            .padding()
+                            .background(CardBackground())
                     }
                     launchButton
                 }
@@ -179,7 +185,7 @@ struct HomeView: View {
                 .padding(.vertical, 8)
         }
         .buttonStyle(.borderedProminent)
-        .disabled(store.selectedVersion == nil || store.selectedAccount == nil || installationManager.isInstalling)
+        .disabled(store.selectedVersion == nil || store.selectedAccount == nil || installationManager.isInstalling || javaInstaller.isWorking)
     }
 }
 

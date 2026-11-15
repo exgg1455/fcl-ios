@@ -67,9 +67,12 @@ enum ArchiveExtractor {
             try decompress(archive, to: tarFile, algorithm: algorithm, skipping: headerLength) { progress("Decompressing", $0) }
             try extractTar(tarFile, to: destination) { progress("Extracting", $0) }
         case .zip:
-            throw ArchiveError.unsupportedFormat("Extract the zip file in the Files app first, then use Import Folder.")
+            let unpacked = workingDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? manager.removeItem(at: unpacked) }
+            try extractZip(archive, to: unpacked, workingDirectory: workingDirectory) { progress("Unpacking", $0) }
+            try mergeUnpacked(unpacked, into: destination, workingDirectory: workingDirectory, progress: progress)
         case .unknown:
-            throw ArchiveError.unsupportedFormat("Use a .tar, .tar.gz or .tar.xz file.")
+            throw ArchiveError.unsupportedFormat("Use a .zip, .tar, .tar.gz or .tar.xz file.")
         }
     }
 
@@ -101,11 +104,12 @@ enum ArchiveExtractor {
         return offset
     }
 
-    private static func decompress(_ source: URL, to destination: URL, algorithm: compression_algorithm, skipping headerLength: Int, progress: (Double) -> Void) throws {
+    private static func decompress(_ source: URL, to destination: URL, algorithm: compression_algorithm, skipping headerLength: Int, length: Int64? = nil, progress: (Double) -> Void) throws {
         let manager = FileManager.default
         guard let input = try? FileHandle(forReadingFrom: source) else { throw ArchiveError.unreadable }
         defer { try? input.close() }
-        let totalSize = ((try? manager.attributesOfItem(atPath: source.path)[.size]) as? NSNumber)?.int64Value ?? 1
+        let fileSize = ((try? manager.attributesOfItem(atPath: source.path)[.size]) as? NSNumber)?.int64Value ?? 1
+        let totalSize = length.map { Int64(headerLength) + $0 } ?? fileSize
         if headerLength > 0 {
             input.seek(toFileOffset: UInt64(headerLength))
         }
@@ -140,7 +144,8 @@ enum ArchiveExtractor {
         while !finished {
             try autoreleasepool {
                 if stream.pointee.src_size == 0 && !inputExhausted {
-                    let chunk = input.readData(ofLength: bufferSize)
+                    let remaining = totalSize - bytesRead
+                    let chunk = remaining > 0 ? input.readData(ofLength: Int(min(Int64(bufferSize), remaining))) : Data()
                     if chunk.isEmpty {
                         inputExhausted = true
                     } else {
@@ -173,6 +178,135 @@ enum ArchiveExtractor {
                 }
             }
         }
+    }
+
+    private static func mergeUnpacked(_ unpacked: URL, into destination: URL, workingDirectory: URL, progress: @escaping (String, Double) -> Void) throws {
+        let manager = FileManager.default
+        let entries = (try? manager.contentsOfDirectory(at: unpacked, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        for entry in entries {
+            let isDirectory = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if !isDirectory {
+                let format = detectFormat(of: entry)
+                if format == .tar || format == .xzTar || format == .gzipTar || format == .zip {
+                    try extract(entry, to: destination, workingDirectory: workingDirectory, progress: progress)
+                    continue
+                }
+            }
+            let target = destination.appendingPathComponent(entry.lastPathComponent)
+            try? manager.removeItem(at: target)
+            try manager.moveItem(at: entry, to: target)
+        }
+    }
+
+    private static func extractZip(_ archive: URL, to destination: URL, workingDirectory: URL, progress: (Double) -> Void) throws {
+        let manager = FileManager.default
+        guard let handle = try? FileHandle(forReadingFrom: archive) else { throw ArchiveError.unreadable }
+        defer { try? handle.close() }
+        let fileSize = handle.seekToEndOfFile()
+        let tailLength = min(fileSize, 65_557)
+        handle.seek(toFileOffset: fileSize - tailLength)
+        let tail = [UInt8](handle.readData(ofLength: Int(tailLength)))
+        guard tail.count >= 22 else { throw ArchiveError.corrupted("zip file is too small") }
+        var endIndex: Int?
+        var index = tail.count - 22
+        while index >= 0 {
+            if tail[index] == 0x50 && tail[index + 1] == 0x4B && tail[index + 2] == 0x05 && tail[index + 3] == 0x06 {
+                endIndex = index
+                break
+            }
+            index -= 1
+        }
+        guard let end = endIndex else { throw ArchiveError.corrupted("zip directory not found") }
+        let entryCount = Int(littleEndian16(tail, end + 10))
+        let directorySize = UInt64(littleEndian32(tail, end + 12))
+        let directoryOffset = UInt64(littleEndian32(tail, end + 16))
+        if directoryOffset == 0xFFFFFFFF || entryCount == 0xFFFF {
+            throw ArchiveError.unsupportedFormat("Zip64 files are not supported.")
+        }
+        handle.seek(toFileOffset: directoryOffset)
+        let directory = [UInt8](handle.readData(ofLength: Int(directorySize)))
+        var offset = 0
+        for entryIndex in 0..<entryCount {
+            guard offset + 46 <= directory.count,
+                  littleEndian32(directory, offset) == 0x02014B50 else {
+                throw ArchiveError.corrupted("invalid zip directory")
+            }
+            let method = littleEndian16(directory, offset + 10)
+            let compressedSize = Int64(littleEndian32(directory, offset + 20))
+            let nameLength = Int(littleEndian16(directory, offset + 28))
+            let extraLength = Int(littleEndian16(directory, offset + 30))
+            let commentLength = Int(littleEndian16(directory, offset + 32))
+            let externalAttributes = littleEndian32(directory, offset + 38)
+            let localOffset = UInt64(littleEndian32(directory, offset + 42))
+            guard offset + 46 + nameLength <= directory.count else {
+                throw ArchiveError.corrupted("invalid zip entry name")
+            }
+            let name = String(decoding: directory[(offset + 46)..<(offset + 46 + nameLength)], as: UTF8.self)
+            offset += 46 + nameLength + extraLength + commentLength
+
+            let relativePath = try sanitize(name)
+            if relativePath.isEmpty { continue }
+            let target = destination.appendingPathComponent(relativePath)
+            let unixMode = Int(externalAttributes >> 16)
+
+            if name.hasSuffix("/") {
+                try manager.createDirectory(at: target, withIntermediateDirectories: true)
+                continue
+            }
+            try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+            handle.seek(toFileOffset: localOffset)
+            let localHeader = [UInt8](handle.readData(ofLength: 30))
+            guard localHeader.count == 30, littleEndian32(localHeader, 0) == 0x04034B50 else {
+                throw ArchiveError.corrupted("invalid zip entry header")
+            }
+            let dataOffset = localOffset + 30 + UInt64(littleEndian16(localHeader, 26)) + UInt64(littleEndian16(localHeader, 28))
+
+            try? manager.removeItem(at: target)
+            switch method {
+            case 0:
+                manager.createFile(atPath: target.path, contents: nil)
+                guard let output = try? FileHandle(forWritingTo: target) else { throw ArchiveError.unreadable }
+                handle.seek(toFileOffset: dataOffset)
+                var remaining = compressedSize
+                while remaining > 0 {
+                    try autoreleasepool {
+                        let chunk = handle.readData(ofLength: Int(min(remaining, Int64(bufferSize))))
+                        if chunk.isEmpty {
+                            throw ArchiveError.corrupted("unexpected end of zip data")
+                        }
+                        output.write(chunk)
+                        remaining -= Int64(chunk.count)
+                    }
+                }
+                try? output.close()
+            case 8:
+                try decompress(archive, to: target, algorithm: COMPRESSION_ZLIB, skipping: Int(dataOffset), length: compressedSize) { _ in }
+            default:
+                throw ArchiveError.unsupportedFormat("Zip compression method \(method) is not supported.")
+            }
+
+            if unixMode & 0o170000 == 0o120000, let linkTarget = try? String(contentsOf: target, encoding: .utf8) {
+                try? manager.removeItem(at: target)
+                try manager.createSymbolicLink(atPath: target.path, withDestinationPath: linkTarget)
+            } else if unixMode & 0o777 != 0 {
+                try? manager.setAttributes([.posixPermissions: unixMode & 0o777], ofItemAtPath: target.path)
+            }
+            progress(Double(entryIndex + 1) / Double(max(entryCount, 1)))
+        }
+    }
+
+    private static func littleEndian16(_ bytes: [UInt8], _ offset: Int) -> UInt16 {
+        guard offset + 2 <= bytes.count else { return 0 }
+        return UInt16(bytes[offset]) | UInt16(bytes[offset + 1]) << 8
+    }
+
+    private static func littleEndian32(_ bytes: [UInt8], _ offset: Int) -> UInt32 {
+        guard offset + 4 <= bytes.count else { return 0 }
+        return UInt32(bytes[offset])
+            | UInt32(bytes[offset + 1]) << 8
+            | UInt32(bytes[offset + 2]) << 16
+            | UInt32(bytes[offset + 3]) << 24
     }
 
     private static func extractTar(_ tarFile: URL, to destination: URL, progress: (Double) -> Void) throws {

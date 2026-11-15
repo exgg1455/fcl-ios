@@ -12,6 +12,7 @@ enum SettingsKey {
     static let selectedAccount = "selectedAccount"
     static let selectedVersion = "selectedVersion"
     static let accounts = "accounts"
+    static let automaticJavaDownload = "automaticJavaDownload"
 }
 
 struct LauncherSettings {
@@ -35,6 +36,12 @@ struct LauncherSettings {
             downloadConcurrency: concurrency > 0 ? concurrency : 16,
             resolutionScale: scale > 0 ? scale : 1.0
         )
+    }
+}
+
+extension LauncherSettings {
+    static var isAutomaticJavaDownloadEnabled: Bool {
+        UserDefaults.standard.object(forKey: SettingsKey.automaticJavaDownload) as? Bool ?? true
     }
 }
 

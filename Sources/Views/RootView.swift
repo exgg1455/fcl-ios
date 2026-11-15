@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var installationManager: InstallationManager
+    @EnvironmentObject private var javaInstaller: JavaRuntimeInstaller
 
     var body: some View {
         TabView {
@@ -21,6 +22,31 @@ struct RootView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(installationManager.errorMessage ?? "")
+        }
+        .background(
+            Color.clear
+                .alert("Java runtime", isPresented: Binding(
+                    get: { javaInstaller.resultMessage != nil },
+                    set: { if !$0 { javaInstaller.resultMessage = nil } }
+                )) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text(javaInstaller.resultMessage ?? "")
+                }
+        )
+        .background(
+            Color.clear
+                .alert("Java installation failed", isPresented: Binding(
+                    get: { javaInstaller.errorMessage != nil },
+                    set: { if !$0 { javaInstaller.errorMessage = nil } }
+                )) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text(javaInstaller.errorMessage ?? "")
+                }
+        )
+        .onAppear {
+            javaInstaller.refresh()
         }
     }
 }

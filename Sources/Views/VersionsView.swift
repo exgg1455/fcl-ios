@@ -3,6 +3,7 @@ import SwiftUI
 struct VersionsView: View {
     @EnvironmentObject private var store: LauncherStore
     @EnvironmentObject private var installationManager: InstallationManager
+    @EnvironmentObject private var javaInstaller: JavaRuntimeInstaller
     @StateObject private var versionList = VersionListModel()
     @State private var section: VersionSection = .installed
     @State private var searchText = ""
@@ -42,6 +43,13 @@ struct VersionsView: View {
                         .padding(.horizontal)
                         .padding(.bottom, 8)
                 }
+                if javaInstaller.isWorking {
+                    JavaProgressContent()
+                        .padding()
+                        .background(CardBackground())
+                        .padding(.horizontal)
+                        .padding(.bottom, 8)
+                }
 
                 switch section {
                 case .installed:
@@ -76,6 +84,10 @@ struct VersionsView: View {
                     installationManager.install(version) {
                         store.refreshInstalledVersions()
                         store.selectedVersion = version.identifier
+                        if LauncherSettings.isAutomaticJavaDownloadEnabled,
+                           let detail = try? GameDirectory.loadVersionDetail(version.identifier) {
+                            javaInstaller.ensureRuntime(for: detail.requiredJavaMajorVersion)
+                        }
                     }
                 }
                 pendingInstallation = nil
@@ -84,7 +96,7 @@ struct VersionsView: View {
                 pendingInstallation = nil
             }
         } message: {
-            Text("The game client, libraries and assets will be downloaded to the Files app under FCL/minecraft.")
+            Text("The game client, libraries and assets will be downloaded to the Files app under FCL/minecraft. The matching Java runtime is downloaded automatically.")
         }
         .confirmationDialog(
             "Delete \(pendingRemoval ?? "")?",

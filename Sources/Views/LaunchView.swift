@@ -10,11 +10,13 @@ struct LaunchRequirement: Identifiable {
 
 struct LaunchView: View {
     @EnvironmentObject private var store: LauncherStore
+    @EnvironmentObject private var javaInstaller: JavaRuntimeInstaller
     @Environment(\.dismiss) private var dismiss
     @State private var requirements: [LaunchRequirement] = []
     @State private var arguments: [String] = []
     @State private var loadError: String?
     @State private var didCopy = false
+    @State private var missingJava: JavaDownloadOption?
 
     var body: some View {
         NavigationView {
@@ -30,6 +32,20 @@ struct LaunchView: View {
                                 Text(requirement.detail)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                }
+
+                if let option = missingJava {
+                    Section(header: Text("Java")) {
+                        if javaInstaller.isWorking {
+                            JavaProgressContent()
+                        } else {
+                            Button {
+                                javaInstaller.install(option)
+                            } label: {
+                                Label("Download \(option.title) (\(ByteCountFormatter.string(fromByteCount: option.downloadSize, countStyle: .file)))", systemImage: "arrow.down.circle.fill")
                             }
                         }
                     }
@@ -63,6 +79,11 @@ struct LaunchView: View {
                 }
             }
             .onAppear(perform: prepare)
+            .onChange(of: javaInstaller.isWorking) { working in
+                if !working {
+                    prepare()
+                }
+            }
         }
     }
 
@@ -81,7 +102,16 @@ struct LaunchView: View {
         }
 
         let requiredJava = detail.requiredJavaMajorVersion
-        let runtime = JavaRuntimeLocator.bestRuntime(for: requiredJava)
+        javaInstaller.refresh()
+        let runtime = javaInstaller.usableRuntime(for: requiredJava)
+        if runtime == nil {
+            missingJava = JavaCatalog.option(for: requiredJava)
+            if LauncherSettings.isAutomaticJavaDownloadEnabled && !javaInstaller.isWorking && javaInstaller.errorMessage == nil {
+                javaInstaller.ensureRuntime(for: requiredJava)
+            }
+        } else {
+            missingJava = nil
+        }
         let classpath = LaunchArgumentBuilder.classpath(for: detail, identifier: versionIdentifier)
         let missingFiles = classpath.filter { !FileManager.default.fileExists(atPath: $0) }
 
@@ -98,7 +128,7 @@ struct LaunchView: View {
             ),
             LaunchRequirement(
                 title: "Java \(requiredJava) runtime",
-                detail: runtime.map { "Using \($0.name) (\($0.fullVersion ?? "unknown version"))." } ?? "No iOS Java \(requiredJava) or newer is installed. Add one in Settings > Java Runtimes.",
+                detail: runtime.map { "Using \($0.name) (\($0.fullVersion ?? "unknown version"))." } ?? (javaInstaller.isWorking ? "Downloading Java \(requiredJava)..." : "No iOS Java \(requiredJava) or newer is installed."),
                 isSatisfied: runtime != nil
             ),
             LaunchRequirement(

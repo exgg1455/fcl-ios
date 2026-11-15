@@ -8,8 +8,9 @@ struct SettingsView: View {
     @AppStorage(SettingsKey.downloadSource) private var downloadSource = DownloadSource.official.rawValue
     @AppStorage(SettingsKey.downloadConcurrency) private var downloadConcurrency = 16
     @AppStorage(SettingsKey.resolutionScale) private var resolutionScale = 1.0
+    @AppStorage(SettingsKey.automaticJavaDownload) private var automaticJavaDownload = true
+    @EnvironmentObject private var javaInstaller: JavaRuntimeInstaller
     @State private var storageDescription = "Calculating"
-    @State private var javaRuntimes: [JavaRuntime] = []
 
     var body: some View {
         NavigationView {
@@ -79,7 +80,8 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(header: Text("Java runtime")) {
+                Section(header: Text("Java runtime"), footer: Text("When enabled, the Java version required by a Minecraft version is downloaded after the game is installed or before it is launched.")) {
+                    Toggle("Download Java automatically", isOn: $automaticJavaDownload)
                     NavigationLink(destination: JavaRuntimesView()) {
                         HStack {
                             Label("Java Runtimes", systemImage: "cup.and.saucer.fill")
@@ -151,15 +153,16 @@ struct SettingsView: View {
     }
 
     private var javaSummary: String {
-        let usable = javaRuntimes.filter { $0.platform.isUsableOnDevice }.count
-        if javaRuntimes.isEmpty {
+        let runtimes = javaInstaller.runtimes
+        let usable = runtimes.filter { $0.platform.isUsableOnDevice }.count
+        if runtimes.isEmpty {
             return "None"
         }
-        return "\(usable) of \(javaRuntimes.count) usable"
+        return "\(usable) of \(runtimes.count) usable"
     }
 
     private func refreshInformation() {
-        javaRuntimes = JavaRuntimeLocator.installedRuntimes()
+        javaInstaller.refresh()
         Task.detached(priority: .utility) {
             let size = GameDirectory.directorySize(GameDirectory.root)
             let text = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)

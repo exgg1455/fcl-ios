@@ -25,8 +25,12 @@ final class JavaRuntimeInstaller: ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published var errorMessage: String?
     @Published var resultMessage: String?
+    @Published private(set) var installingMajorVersion: Int?
+    @Published private(set) var queuedMajorVersions: [Int] = []
 
     private var currentTask: Task<Void, Never>?
+    private var queue: [JavaDownloadOption] = []
+    private var silentResult = false
 
     nonisolated private static var stagingRoot: URL {
         GameDirectory.javaRuntimes.appendingPathComponent(".staging", isDirectory: true)
@@ -36,18 +40,63 @@ final class JavaRuntimeInstaller: ObservableObject {
         runtimes = JavaRuntimeLocator.installedRuntimes()
     }
 
+    func usableRuntime(for requiredMajorVersion: Int) -> JavaRuntime? {
+        runtimes.filter { $0.platform.isUsableOnDevice && ($0.majorVersion ?? 0) >= requiredMajorVersion }
+            .min { ($0.majorVersion ?? 0) < ($1.majorVersion ?? 0) }
+    }
+
+    func isInstalled(_ option: JavaDownloadOption) -> Bool {
+        runtimes.contains { $0.platform.isUsableOnDevice && $0.majorVersion == option.majorVersion }
+    }
+
+    func isPending(_ option: JavaDownloadOption) -> Bool {
+        installingMajorVersion == option.majorVersion || queuedMajorVersions.contains(option.majorVersion)
+    }
+
+    @discardableResult
+    func ensureRuntime(for requiredMajorVersion: Int) -> JavaDownloadOption? {
+        refresh()
+        if usableRuntime(for: requiredMajorVersion) != nil {
+            return nil
+        }
+        guard let option = JavaCatalog.option(for: requiredMajorVersion) else { return nil }
+        if !isPending(option) {
+            install(option, silent: true)
+        }
+        return option
+    }
+
+    func install(_ option: JavaDownloadOption, silent: Bool = false) {
+        guard !isPending(option) else { return }
+        if isWorking {
+            queue.append(option)
+            queuedMajorVersions = queue.map { $0.majorVersion }
+            return
+        }
+        installingMajorVersion = option.majorVersion
+        silentResult = silent
+        start { report in
+            report("Downloading \(option.title)", 0)
+            let archive = try await JavaRuntimeInstaller.downloadArchive(from: option.address) { fraction in
+                report("Downloading \(option.title)", fraction)
+            }
+            defer { try? FileManager.default.removeItem(at: archive) }
+            return try JavaRuntimeInstaller.installArchive(archive, suggestedName: option.directoryName, fixedName: option.directoryName, report: report)
+        }
+    }
+
     func importArchive(from file: URL) {
         start { report in
             let local = try JavaRuntimeInstaller.copySecurityScoped(file, report: report)
             defer { try? FileManager.default.removeItem(at: local) }
-            return try JavaRuntimeInstaller.installArchive(local, suggestedName: file.lastPathComponent, report: report)
+            return try JavaRuntimeInstaller.installArchive(local, suggestedName: file.lastPathComponent, fixedName: nil, report: report)
         }
     }
 
     func importFolder(from folder: URL) {
         start { report in
             let local = try JavaRuntimeInstaller.copySecurityScoped(folder, report: report)
-            return try JavaRuntimeInstaller.finalize(staging: local, suggestedName: folder.lastPathComponent)
+            return try JavaRuntimeInstaller.finalize(staging: local, suggestedName: folder.lastPathComponent, fixedName: nil)
         }
     }
 
@@ -58,11 +107,13 @@ final class JavaRuntimeInstaller: ObservableObject {
                 report("Downloading", fraction)
             }
             defer { try? FileManager.default.removeItem(at: archive) }
-            return try JavaRuntimeInstaller.installArchive(archive, suggestedName: address.lastPathComponent, report: report)
+            return try JavaRuntimeInstaller.installArchive(archive, suggestedName: address.lastPathComponent, fixedName: nil, report: report)
         }
     }
 
     func cancel() {
+        queue.removeAll()
+        queuedMajorVersions = []
         currentTask?.cancel()
     }
 
@@ -102,14 +153,25 @@ final class JavaRuntimeInstaller: ObservableObject {
                 if !runtime.platform.isUsableOnDevice {
                     message += " This runtime is not built for iOS and cannot start the game."
                 }
-                resultMessage = message
+                if !silentResult || !runtime.platform.isUsableOnDevice {
+                    resultMessage = message
+                }
             case .failure(let error):
-                errorMessage = error.localizedDescription
+                if !Task.isCancelled {
+                    errorMessage = error.localizedDescription
+                }
             }
             try? FileManager.default.removeItem(at: JavaRuntimeInstaller.stagingRoot)
             isWorking = false
+            installingMajorVersion = nil
+            silentResult = false
             currentTask = nil
             refresh()
+            if !queue.isEmpty {
+                let next = queue.removeFirst()
+                queuedMajorVersions = queue.map { $0.majorVersion }
+                install(next, silent: true)
+            }
         }
     }
 
@@ -142,16 +204,16 @@ final class JavaRuntimeInstaller: ObservableObject {
         return destination
     }
 
-    nonisolated private static func installArchive(_ archive: URL, suggestedName: String, report: @escaping @Sendable (String, Double) -> Void) throws -> JavaRuntime {
+    nonisolated private static func installArchive(_ archive: URL, suggestedName: String, fixedName: String?, report: @escaping @Sendable (String, Double) -> Void) throws -> JavaRuntime {
         let staging = stagingRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let working = stagingRoot.appendingPathComponent("work-" + UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: working) }
         try ArchiveExtractor.extract(archive, to: staging, workingDirectory: working, progress: report)
         report("Finishing", 1)
-        return try finalize(staging: staging, suggestedName: suggestedName)
+        return try finalize(staging: staging, suggestedName: suggestedName, fixedName: fixedName)
     }
 
-    nonisolated private static func finalize(staging: URL, suggestedName: String) throws -> JavaRuntime {
+    nonisolated private static func finalize(staging: URL, suggestedName: String, fixedName: String?) throws -> JavaRuntime {
         let manager = FileManager.default
         defer { try? manager.removeItem(at: staging) }
         guard let runtimeRoot = JavaRuntimeLocator.findRuntimeRoot(in: staging) else {
@@ -164,14 +226,17 @@ final class JavaRuntimeInstaller: ObservableObject {
         } else {
             baseName = cleanName(suggestedName)
         }
-        var destination = GameDirectory.javaRuntimes.appendingPathComponent(baseName, isDirectory: true)
+        var destination = GameDirectory.javaRuntimes.appendingPathComponent(fixedName ?? baseName, isDirectory: true)
+        if fixedName != nil, manager.fileExists(atPath: destination.path) {
+            try manager.removeItem(at: destination)
+        }
         var suffix = 2
         while manager.fileExists(atPath: destination.path) {
             destination = GameDirectory.javaRuntimes.appendingPathComponent("\(baseName)-\(suffix)", isDirectory: true)
             suffix += 1
         }
         try manager.moveItem(at: runtimeRoot, to: destination)
-        makeExecutable(destination)
+        prepareForDevice(destination)
         guard let runtime = JavaRuntimeLocator.describe(destination, isBundled: false) else {
             throw JavaInstallError.runtimeNotFound
         }
@@ -189,13 +254,36 @@ final class JavaRuntimeInstaller: ObservableObject {
         return result.isEmpty ? "java" : result
     }
 
-    nonisolated private static func makeExecutable(_ directory: URL) {
+    nonisolated private static func prepareForDevice(_ directory: URL) {
         let manager = FileManager.default
-        let binary = directory.appendingPathComponent("bin", isDirectory: true)
-        guard let entries = try? manager.contentsOfDirectory(at: binary, includingPropertiesForKeys: nil) else { return }
-        for entry in entries {
-            try? manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entry.path)
+        let unusedItems = [
+            "ASSEMBLY_EXCEPTION",
+            "LICENSE",
+            "THIRD_PARTY_README",
+            "bin",
+            "include",
+            "man",
+            "demo",
+            "sample",
+            "lib/ct.sym",
+            "lib/jspawnhelper",
+            "lib/libjsig.dylib",
+            "lib/src.zip",
+            "lib/tools.jar",
+            "jre/bin"
+        ]
+        for item in unusedItems {
+            try? manager.removeItem(at: directory.appendingPathComponent(item))
         }
+        if let enumerator = manager.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) {
+            for case let file as URL in enumerator where file.pathExtension == "dylib" {
+                try? manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+            }
+        }
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableDirectory = directory
+        try? mutableDirectory.setResourceValues(values)
     }
 
     nonisolated private static func downloadArchive(from address: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
