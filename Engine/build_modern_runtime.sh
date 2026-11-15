@@ -38,13 +38,14 @@ done
 echo "Downloading MoltenVK $MOLTENVK_VERSION"
 curl -fsSL --retry 3 -o "$WORK_DIRECTORY/moltenvk.tar" "https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_VERSION/MoltenVK-ios.tar"
 tar -xf "$WORK_DIRECTORY/moltenvk.tar" -C "$WORK_DIRECTORY/moltenvk"
-MOLTENVK_LIBRARY="$(find "$WORK_DIRECTORY/moltenvk" -name libMoltenVK.dylib \( -path '*/ios-arm64/*' -o -path '*/iOS/*' \) | grep -iv simulator | head -n 1)"
-if [ -z "$MOLTENVK_LIBRARY" ]; then
+MOLTENVK_LIBRARY="$WORK_DIRECTORY/moltenvk/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework/MoltenVK"
+if [ ! -f "$MOLTENVK_LIBRARY" ]; then
     echo "libMoltenVK.dylib for iOS was not found"
-    find "$WORK_DIRECTORY/moltenvk" -name 'libMoltenVK*'
+    find "$WORK_DIRECTORY/moltenvk" -maxdepth 6
     exit 1
 fi
 cp "$MOLTENVK_LIBRARY" "$APP_PATH/lwjgl_natives/libMoltenVK.dylib"
+install_name_tool -id @rpath/libMoltenVK.dylib "$APP_PATH/lwjgl_natives/libMoltenVK.dylib"
 ldid -S "$APP_PATH/lwjgl_natives/libMoltenVK.dylib"
 
 echo "Building SDL bridge"
