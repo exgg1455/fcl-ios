@@ -98,7 +98,7 @@ struct LaunchView: View {
             ),
             LaunchRequirement(
                 title: "Java \(requiredJava) runtime",
-                detail: runtime.map { "Using \($0.name)." } ?? "No Java runtime built for iOS was found in Files > FCL > java.",
+                detail: runtime.map { "Using \($0.name) (\($0.fullVersion ?? "unknown version"))." } ?? "No iOS Java \(requiredJava) or newer is installed. Add one in Settings > Java Runtimes.",
                 isSatisfied: runtime != nil
             ),
             LaunchRequirement(

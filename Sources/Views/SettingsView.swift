@@ -79,20 +79,13 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(header: Text("Java runtime"), footer: Text("Place a Java runtime built for iOS into Files > FCL > java to make it available.")) {
-                    if javaRuntimes.isEmpty {
-                        Text("No Java runtime found")
-                            .foregroundColor(.secondary)
-                    } else {
-                        ForEach(javaRuntimes) { runtime in
-                            HStack {
-                                Text(runtime.name)
-                                Spacer()
-                                if let major = runtime.majorVersion {
-                                    Text("Java \(major)")
-                                        .foregroundColor(.secondary)
-                                }
-                            }
+                Section(header: Text("Java runtime")) {
+                    NavigationLink(destination: JavaRuntimesView()) {
+                        HStack {
+                            Label("Java Runtimes", systemImage: "cup.and.saucer.fill")
+                            Spacer()
+                            Text(javaSummary)
+                                .foregroundColor(.secondary)
                         }
                     }
                 }
@@ -155,6 +148,14 @@ struct SettingsView: View {
             .onAppear(perform: refreshInformation)
         }
         .navigationViewStyle(.stack)
+    }
+
+    private var javaSummary: String {
+        let usable = javaRuntimes.filter { $0.platform.isUsableOnDevice }.count
+        if javaRuntimes.isEmpty {
+            return "None"
+        }
+        return "\(usable) of \(javaRuntimes.count) usable"
     }
 
     private func refreshInformation() {
