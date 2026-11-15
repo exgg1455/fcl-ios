@@ -79,3 +79,79 @@ jobs:
         with:
           name: ${{ env.APP_NAME }}-error-log
           path: error.txt
+
+  engine:
+    runs-on: macos-latest
+    env:
+      APP_NAME: FoldCraftLauncher
+      ENGINE_REPOSITORY: https://github.com/AngelAuraMC/Amethyst-iOS.git
+      ENGINE_COMMIT: f98c4133c72d39e06ceac42b57cc4477c52105fc
+      BUNDLE_IDENTIFIER: com.nxteam.foldcraftlauncher.test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout engine
+        run: |
+          git clone "$ENGINE_REPOSITORY" engine
+          cd engine
+          git checkout "$ENGINE_COMMIT"
+          git submodule update --init --recursive
+
+      - name: Install Java 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "8"
+
+      - name: Install tools
+        run: brew install ldid make
+
+      - name: Build engine
+        run: |
+          set -o pipefail
+          cd engine
+          gmake -j"$(sysctl -n hw.ncpu)" payload RELEASE=1 BOOTJDK="$JAVA_HOME/bin" 2>&1 | tee ../engine.log
+
+      - name: Brand and package
+        run: |
+          APP_PATH="engine/artifacts/Payload/AngelAuraAmethyst.app"
+          test -d "$APP_PATH"
+          plutil -replace CFBundleIdentifier -string "$BUNDLE_IDENTIFIER" "$APP_PATH/Info.plist"
+          plutil -replace CFBundleDisplayName -string "FCL" "$APP_PATH/Info.plist"
+          plutil -replace CFBundleName -string "FCL" "$APP_PATH/Info.plist"
+          ldid -S"engine/entitlements.sideload.xml" "$APP_PATH/AngelAuraAmethyst"
+          cd engine/artifacts
+          zip -qry --symlinks "../../$APP_NAME-engine-unsigned.ipa" Payload
+          cd ../..
+          ls -lh "$APP_NAME-engine-unsigned.ipa"
+
+      - name: Upload engine IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-engine-unsigned-ipa
+          path: ${{ env.APP_NAME }}-engine-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Collect errors
+        if: failure()
+        run: |
+          {
+            echo "=== Errors ==="
+            if [ -f engine.log ]; then
+              grep -nE "error:|Error |\*\*\* |fatal" engine.log | head -100 || true
+              echo
+              echo "=== Last 200 lines of engine log ==="
+              tail -n 200 engine.log
+            else
+              echo "Engine log not found. The failure happened before the build step."
+            fi
+          } > error.txt
+          cat error.txt
+
+      - name: Upload error log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-engine-error-log
+          path: error.txt
