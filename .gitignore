@@ -1,0 +1,9 @@
+*.xcodeproj
+build/
+Payload/
+*.ipa
+error.txt
+build.log
+.DS_Store
+Info.plist
+Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png
